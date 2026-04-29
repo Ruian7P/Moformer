@@ -1300,3 +1300,231 @@ class MoPInformer(nn.Module):
             p_embed = torch.cat((p_embed, rna_feats), axis=-1)
         expr_out = self.pToExpr(p_embed).squeeze(-1)
         return expr_out, (torch.cat(attn_list), cross_attn_w)
+
+
+class Moformer(nn.Module):
+    """Moformer: motif-as-promoter model.
+
+    This model does not use promoter sequence as input. Instead, it builds
+    a promoter token from promoter motif features and combines it with
+    enhancer sequence tokens in a shared self-attention backbone.
+    """
+
+    def __init__(
+        self,
+        base_size=4,
+        n_encoder=3,
+        out_dim=128,
+        head=4,
+        pre_trained_encoder=None,
+        n_enhancer=50,
+        device='cuda',
+        useBN=True,
+        usePromoterSignal=True,
+        useFeat=True,
+        n_extraFeat=0,
+        useLN=True,
+        motif_feat_dim=1796,
+        motif_hidden_dim=128,
+    ):
+        super(Moformer, self).__init__()
+        self.n_enhancer = n_enhancer
+        self.out_dim = out_dim
+        self.useFeat = useFeat
+        self.usePromoterSignal = usePromoterSignal
+        self.n_extraFeat = n_extraFeat
+        self.useBN = useBN
+        self.base_size = base_size
+        self.useLN = useLN
+        self.motif_feat_dim = motif_feat_dim
+        if pre_trained_encoder is not None:
+            self.seq_encoder = pre_trained_encoder
+            self.name = 'Moformer.preTrainedConv'
+        else:
+            self.seq_encoder = seq_256bp_encoder(base_size=base_size)
+            self.name = 'Moformer'
+        self.n_encoder = n_encoder
+        self.device = device
+        self.attn_encoder = get_clones(MHAttention_encoderLayer(d_model=out_dim, nhead=head), self.n_encoder)
+        attn_mask = (~np.identity(self.n_enhancer + 1).astype(bool))
+        attn_mask[:, 0] = False
+        attn_mask[0, :] = False
+        attn_mask = torch.from_numpy(attn_mask)
+        attn_mask.masked_fill(attn_mask, float('-inf'))
+        self.attn_mask = attn_mask
+        if self.useBN:
+            self.conv_out = nn.Sequential(
+                nn.Conv2d(in_channels=128, out_channels=64, kernel_size=(1, 3), dilation=(1, 2)),
+                nn.BatchNorm2d(64),
+                nn.ELU(),
+                nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(1, 3), dilation=(1, 3)),
+                nn.BatchNorm2d(64),
+                nn.ELU(),
+                nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(1, 3), dilation=(1, 3)),
+                nn.BatchNorm2d(64),
+                nn.ELU(),
+                nn.Conv2d(in_channels=64, out_channels=32, kernel_size=(1, 1)),
+                nn.BatchNorm2d(32),
+                nn.ELU(),
+                nn.Linear(109, int(self.out_dim / 32)),
+                nn.ELU(),
+            )
+        else:
+            self.conv_out = nn.Sequential(
+                nn.Conv2d(in_channels=128, out_channels=64, kernel_size=(1, 3), dilation=(1, 2)),
+                nn.ELU(),
+                nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(1, 3), dilation=(1, 3)),
+                nn.ELU(),
+                nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(1, 3), dilation=(1, 3)),
+                nn.ELU(),
+                nn.Conv2d(in_channels=64, out_channels=32, kernel_size=(1, 1)),
+                nn.ELU(),
+                nn.Linear(109, int(self.out_dim / 32)),
+                nn.ELU(),
+            )
+        n_feat = 0
+        if self.useFeat:
+            if self.usePromoterSignal:
+                n_feat = 9
+            else:
+                n_feat = 8
+        self.pToExpr = nn.Sequential(
+            nn.Linear(self.out_dim + n_feat, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+        if n_extraFeat == 0:
+            n_extraFeat = n_extraFeat + 1
+        self.add_pos_conv = nn.Sequential(
+            nn.Conv1d(in_channels=self.out_dim + n_extraFeat, out_channels=self.out_dim, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=self.out_dim, out_channels=self.out_dim, kernel_size=1),
+            nn.ReLU(),
+        )
+
+        self.motif_encoder = nn.Sequential(
+            nn.Linear(self.motif_feat_dim, motif_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(motif_hidden_dim, self.out_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, enh_seq, rna_feats=None, enh_feats=None, motif_feats=None):
+        if motif_feats is None:
+            raise ValueError('Moformer requires motif_feats input.')
+
+        enhancers_padding_mask = ~(enh_seq.sum(-1).sum(-1) > 0).bool()
+        enh_embed = self.seq_encoder(enh_seq)
+        enh_embed = self.conv_out(enh_embed)
+        enh_embed = torch.flatten(enh_embed.permute(0, 2, 1, 3), start_dim=2)
+
+        promoter_embed = self.motif_encoder(motif_feats.float()).unsqueeze(1)
+        pe_flatten_embed = torch.cat([promoter_embed, enh_embed], dim=1)
+
+        if enh_feats is not None:
+            pe_flatten_embed = self.add_pos_conv(
+                torch.concat([pe_flatten_embed, enh_feats], axis=-1).permute(0, 2, 1)
+            ).permute(0, 2, 1)
+
+        promoter_mask = torch.zeros(
+            (enhancers_padding_mask.shape[0], 1),
+            dtype=enhancers_padding_mask.dtype,
+            device=enhancers_padding_mask.device,
+        )
+        pe_padding_mask = torch.cat([promoter_mask, enhancers_padding_mask], dim=1)
+
+        attn_list = []
+        for i in range(self.n_encoder):
+            pe_flatten_embed, attn = self.attn_encoder[i](
+                pe_flatten_embed,
+                enhancers_padding_mask=pe_padding_mask,
+                attn_mask=self.attn_mask.to(pe_flatten_embed.device),
+            )
+            attn_list.append(attn.unsqueeze(0))
+
+        p_embed = pe_flatten_embed[:, 0, :]
+        if rna_feats is not None:
+            p_embed = torch.cat((p_embed, rna_feats), axis=-1)
+        expr_out = self.pToExpr(p_embed).squeeze(-1)
+        return expr_out, torch.cat(attn_list)
+
+
+class Moformer_P(nn.Module):
+    """Promoter-only Moformer.
+
+    Uses promoter motif features as the only promoter input (no promoter sequence),
+    matching the comparison scope of EPInformer_promoter / MoPInformer_P style runs.
+    """
+
+    def __init__(
+        self,
+        base_size=4,
+        n_encoder=3,
+        out_dim=128,
+        head=4,
+        pre_trained_encoder=None,
+        n_enhancer=50,
+        device='cuda',
+        useBN=True,
+        usePromoterSignal=True,
+        useFeat=True,
+        n_extraFeat=0,
+        useLN=True,
+        motif_feat_dim=1796,
+        motif_hidden_dim=128,
+    ):
+        super(Moformer_P, self).__init__()
+        self.out_dim = out_dim
+        self.useFeat = useFeat
+        self.usePromoterSignal = usePromoterSignal
+        self.useBN = useBN
+        self.base_size = base_size
+        self.useLN = useLN
+        self.motif_feat_dim = motif_feat_dim
+        self.n_encoder = n_encoder
+        self.device = device
+        self.name = 'Moformer-P'
+
+        self.motif_encoder = nn.Sequential(
+            nn.Linear(self.motif_feat_dim, motif_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(motif_hidden_dim, self.out_dim),
+            nn.ReLU(),
+        )
+        self.attn_encoder = get_clones(MHAttention_encoderLayer(d_model=out_dim, nhead=head), self.n_encoder)
+
+        n_feat = 0
+        if self.useFeat:
+            if self.usePromoterSignal:
+                n_feat = 9
+            else:
+                n_feat = 8
+        self.pToExpr = nn.Sequential(
+            nn.Linear(self.out_dim + n_feat, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+
+    def forward(self, enh_seq=None, rna_feats=None, enh_feats=None, motif_feats=None):
+        if motif_feats is None:
+            raise ValueError('Moformer_P requires motif_feats input.')
+        promoter_token = self.motif_encoder(motif_feats.float()).unsqueeze(1)
+
+        attn_list = []
+        for i in range(self.n_encoder):
+            promoter_token, attn = self.attn_encoder[i](
+                promoter_token,
+                enhancers_padding_mask=None,
+                attn_mask=None,
+            )
+            attn_list.append(attn.unsqueeze(0))
+
+        p_embed = promoter_token[:, 0, :]
+        if rna_feats is not None:
+            p_embed = torch.cat((p_embed, rna_feats), axis=-1)
+        expr_out = self.pToExpr(p_embed).squeeze(-1)
+        return expr_out, torch.cat(attn_list)
