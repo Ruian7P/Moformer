@@ -228,6 +228,45 @@ def preprocess_motif_features(motif_df, train_ids, use_log1p=False, use_zscore=F
     return out
 
 
+def build_motif_token_masks(motif_columns, include_global=True):
+    """Build fixed column-selection masks for motif multi-token encoding.
+
+    Tokenization rule:
+    - columns ending with `__bin{k}` go to token `bin{k}`
+    - columns without `__bin` go to `global` token (optional)
+    """
+    bin_to_idx = {}
+    global_idx = []
+    for i, col in enumerate(motif_columns):
+        if '__bin' in col:
+            try:
+                b = int(str(col).rsplit('__bin', 1)[1])
+            except Exception:
+                global_idx.append(i)
+                continue
+            bin_to_idx.setdefault(b, []).append(i)
+        else:
+            global_idx.append(i)
+
+    if len(bin_to_idx) == 0:
+        return None, None
+
+    token_names = []
+    token_indices = []
+    for b in sorted(bin_to_idx.keys()):
+        token_names.append(f'bin{b}')
+        token_indices.append(bin_to_idx[b])
+    if include_global and len(global_idx) > 0:
+        token_names.append('global')
+        token_indices.append(global_idx)
+
+    d = len(motif_columns)
+    masks = np.zeros((len(token_indices), d), dtype=np.float32)
+    for t, idxs in enumerate(token_indices):
+        masks[t, idxs] = 1.0
+    return masks, token_names
+
+
 class EarlyStopping:
     def __init__(self, patience=3, verbose=False, delta=0, path='checkpoint.pt'):
         self.patience = patience
@@ -462,6 +501,8 @@ def parse_args():
     parser.add_argument('--motif_log1p', action='store_true', help='apply log1p transform to motif features')
     parser.add_argument('--motif_zscore', action='store_true', help='z-score motif features using train-fold statistics')
     parser.add_argument('--motif_svd_dim', type=int, help='optional SVD dimension for motif features (0 to disable)', default=0)
+    parser.add_argument('--motif_multitoken', action='store_true', help='split motif features into multi-token inputs using __bin columns')
+    parser.add_argument('--motif_multitoken_include_global', action='store_true', help='when --motif_multitoken, add one extra global token for non-bin columns')
     parser.add_argument('--seed', type=int, help='global random seed for reproducible training', default=42)
     return parser.parse_args()
 
@@ -550,6 +591,20 @@ def main():
                         'motif_zero% train/valid/test:',
                         f'{z_tr:.2f}/{z_va:.2f}/{z_te:.2f}',
                     )
+                motif_token_masks = None
+                if args.motif_multitoken:
+                    if args.motif_svd_dim > 0:
+                        print('Warning: --motif_multitoken is disabled because --motif_svd_dim > 0 destroys bin structure.')
+                    elif ds.motif_df is not None:
+                        motif_token_masks, token_names = build_motif_token_masks(
+                            list(ds.motif_df.columns),
+                            include_global=args.motif_multitoken_include_global,
+                        )
+                        if motif_token_masks is None:
+                            print('Warning: no __bin columns detected; falling back to single-token motif encoding.')
+                        else:
+                            token_sizes = motif_token_masks.sum(axis=1).astype(int).tolist()
+                            print('motif multitoken enabled:', ', '.join([f'{n}:{s}' for n, s in zip(token_names, token_sizes)]))
 
                 ensid_list = [eid.decode('utf-8') for eid in ds.data_h5['ensid'][:]]
                 ensid_df = pd.DataFrame(ensid_list, columns=['ensid'])
@@ -577,6 +632,7 @@ def main():
                         useBN=False,
                         usePromoterSignal=use_prm_signal,
                         motif_feat_dim=ds.motif_feat_dim,
+                        motif_token_masks=motif_token_masks,
                     ).to(device)
                     print('freezing the enhancer encoder parameters')
                     for name, value in model.named_parameters():
@@ -594,6 +650,7 @@ def main():
                         useBN=False,
                         usePromoterSignal=use_prm_signal,
                         motif_feat_dim=ds.motif_feat_dim,
+                        motif_token_masks=motif_token_masks,
                     ).to(device)
 
                 use_rna_feats_flag = 'rnafeats' if use_rna_feats else 'nornafeats'
@@ -606,6 +663,8 @@ def main():
                     motif_tag = motif_tag + '.zscore'
                 if args.motif_svd_dim > 0:
                     motif_tag = motif_tag + f'.svd{args.motif_svd_dim}'
+                if args.motif_multitoken and motif_token_masks is not None:
+                    motif_tag = motif_tag + f'.mtok{motif_token_masks.shape[0]}'
                 model.name = model.name + '.{}.{}.{}enhs.{}feats.{}.{}.{}.{}kb2TSS.{}'.format(
                     cell,
                     expr_type,

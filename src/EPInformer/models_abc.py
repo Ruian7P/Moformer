@@ -1326,6 +1326,7 @@ class Moformer(nn.Module):
         useLN=True,
         motif_feat_dim=1796,
         motif_hidden_dim=128,
+        motif_token_masks=None,
     ):
         super(Moformer, self).__init__()
         self.n_enhancer = n_enhancer
@@ -1404,12 +1405,51 @@ class Moformer(nn.Module):
             nn.ReLU(),
         )
 
-        self.motif_encoder = nn.Sequential(
-            nn.Linear(self.motif_feat_dim, motif_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(motif_hidden_dim, self.out_dim),
-            nn.ReLU(),
-        )
+        if motif_token_masks is None:
+            self.motif_token_masks = None
+            self.motif_encoder = nn.Sequential(
+                nn.Linear(self.motif_feat_dim, motif_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(motif_hidden_dim, self.out_dim),
+                nn.ReLU(),
+            )
+            self.n_motif_tokens = 1
+        else:
+            motif_token_masks = torch.as_tensor(motif_token_masks, dtype=torch.float32)
+            if motif_token_masks.ndim != 2 or motif_token_masks.shape[1] != self.motif_feat_dim:
+                raise ValueError(
+                    f'motif_token_masks must be [n_tokens, {self.motif_feat_dim}], got {tuple(motif_token_masks.shape)}'
+                )
+            self.register_buffer('motif_token_masks', motif_token_masks)
+            self.n_motif_tokens = int(motif_token_masks.shape[0])
+            self.motif_token_encoders = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(self.motif_feat_dim, motif_hidden_dim),
+                        nn.ReLU(),
+                        nn.Linear(motif_hidden_dim, self.out_dim),
+                        nn.ReLU(),
+                    )
+                    for _ in range(self.n_motif_tokens)
+                ]
+            )
+            self.motif_token_pool = nn.Linear(self.out_dim, 1)
+
+    def _encode_motif_tokens(self, motif_feats):
+        if self.motif_token_masks is None:
+            return self.motif_encoder(motif_feats.float()).unsqueeze(1)
+        masked = motif_feats.float().unsqueeze(1) * self.motif_token_masks.unsqueeze(0)
+        token_embeds = []
+        for i, enc in enumerate(self.motif_token_encoders):
+            token_embeds.append(enc(masked[:, i, :]))
+        return torch.stack(token_embeds, dim=1)
+
+    def _pool_motif_tokens(self, motif_tokens):
+        if motif_tokens.shape[1] == 1:
+            return motif_tokens
+        token_logits = self.motif_token_pool(motif_tokens).squeeze(-1)
+        token_w = torch.softmax(token_logits, dim=1).unsqueeze(-1)
+        return torch.sum(token_w * motif_tokens, dim=1, keepdim=True)
 
     def forward(self, enh_seq, rna_feats=None, enh_feats=None, motif_feats=None):
         if motif_feats is None:
@@ -1420,7 +1460,8 @@ class Moformer(nn.Module):
         enh_embed = self.conv_out(enh_embed)
         enh_embed = torch.flatten(enh_embed.permute(0, 2, 1, 3), start_dim=2)
 
-        promoter_embed = self.motif_encoder(motif_feats.float()).unsqueeze(1)
+        motif_tokens = self._encode_motif_tokens(motif_feats)
+        promoter_embed = self._pool_motif_tokens(motif_tokens)
         pe_flatten_embed = torch.cat([promoter_embed, enh_embed], dim=1)
 
         if enh_feats is not None:
@@ -1474,6 +1515,7 @@ class Moformer_P(nn.Module):
         useLN=True,
         motif_feat_dim=1796,
         motif_hidden_dim=128,
+        motif_token_masks=None,
     ):
         super(Moformer_P, self).__init__()
         self.out_dim = out_dim
@@ -1487,12 +1529,35 @@ class Moformer_P(nn.Module):
         self.device = device
         self.name = 'Moformer-P'
 
-        self.motif_encoder = nn.Sequential(
-            nn.Linear(self.motif_feat_dim, motif_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(motif_hidden_dim, self.out_dim),
-            nn.ReLU(),
-        )
+        if motif_token_masks is None:
+            self.motif_token_masks = None
+            self.motif_encoder = nn.Sequential(
+                nn.Linear(self.motif_feat_dim, motif_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(motif_hidden_dim, self.out_dim),
+                nn.ReLU(),
+            )
+            self.n_motif_tokens = 1
+        else:
+            motif_token_masks = torch.as_tensor(motif_token_masks, dtype=torch.float32)
+            if motif_token_masks.ndim != 2 or motif_token_masks.shape[1] != self.motif_feat_dim:
+                raise ValueError(
+                    f'motif_token_masks must be [n_tokens, {self.motif_feat_dim}], got {tuple(motif_token_masks.shape)}'
+                )
+            self.register_buffer('motif_token_masks', motif_token_masks)
+            self.n_motif_tokens = int(motif_token_masks.shape[0])
+            self.motif_token_encoders = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(self.motif_feat_dim, motif_hidden_dim),
+                        nn.ReLU(),
+                        nn.Linear(motif_hidden_dim, self.out_dim),
+                        nn.ReLU(),
+                    )
+                    for _ in range(self.n_motif_tokens)
+                ]
+            )
+            self.motif_token_pool = nn.Linear(self.out_dim, 1)
         self.attn_encoder = get_clones(MHAttention_encoderLayer(d_model=out_dim, nhead=head), self.n_encoder)
 
         n_feat = 0
@@ -1509,10 +1574,19 @@ class Moformer_P(nn.Module):
             nn.Linear(128, 1),
         )
 
+    def _encode_motif_tokens(self, motif_feats):
+        if self.motif_token_masks is None:
+            return self.motif_encoder(motif_feats.float()).unsqueeze(1)
+        masked = motif_feats.float().unsqueeze(1) * self.motif_token_masks.unsqueeze(0)
+        token_embeds = []
+        for i, enc in enumerate(self.motif_token_encoders):
+            token_embeds.append(enc(masked[:, i, :]))
+        return torch.stack(token_embeds, dim=1)
+
     def forward(self, enh_seq=None, rna_feats=None, enh_feats=None, motif_feats=None):
         if motif_feats is None:
             raise ValueError('Moformer_P requires motif_feats input.')
-        promoter_token = self.motif_encoder(motif_feats.float()).unsqueeze(1)
+        promoter_token = self._encode_motif_tokens(motif_feats)
 
         attn_list = []
         for i in range(self.n_encoder):
@@ -1523,7 +1597,12 @@ class Moformer_P(nn.Module):
             )
             attn_list.append(attn.unsqueeze(0))
 
-        p_embed = promoter_token[:, 0, :]
+        if promoter_token.shape[1] == 1:
+            p_embed = promoter_token[:, 0, :]
+        else:
+            token_logits = self.motif_token_pool(promoter_token).squeeze(-1)
+            token_w = torch.softmax(token_logits, dim=1).unsqueeze(-1)
+            p_embed = torch.sum(token_w * promoter_token, dim=1)
         if rna_feats is not None:
             p_embed = torch.cat((p_embed, rna_feats), axis=-1)
         expr_out = self.pToExpr(p_embed).squeeze(-1)
