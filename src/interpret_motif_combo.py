@@ -54,6 +54,11 @@ def parse_args():
         action='store_true',
         help='Exclude motif groups whose name contains "Unknown" (case-insensitive).',
     )
+    p.add_argument(
+        '--exclude_mixed',
+        action='store_true',
+        help='Exclude motif groups whose name contains "Mixed" (case-insensitive).',
+    )
     p.add_argument('--task', type=str, default='auto', choices=['auto', 'reg', 'cls'])
     p.add_argument('--expr_threshold', type=float, default=0.0)
     p.add_argument(
@@ -69,6 +74,30 @@ def parse_args():
     )
     p.add_argument('--cls_prob_threshold', type=float, default=0.5)
     p.add_argument('--head', type=int, default=4)
+    p.add_argument(
+        '--active_sample_n',
+        type=int,
+        default=0,
+        help='If >0 (motif_count=1), sample this many promoters from each motif active set and compute sampled drop.',
+    )
+    p.add_argument(
+        '--active_sample_trials',
+        type=int,
+        default=100,
+        help='Number of random samplings per motif when --active_sample_n > 0.',
+    )
+    p.add_argument(
+        '--active_sample_seed',
+        type=int,
+        default=42,
+        help='Random seed for --active_sample_* sampling.',
+    )
+    p.add_argument(
+        '--min_active_genes',
+        type=int,
+        default=0,
+        help='Drop motif groups with active_genes < this threshold in the selected split.',
+    )
 
     p.add_argument('--motif_count', type=int, default=1, help='Number of motif groups masked together.')
     p.add_argument('--candidate_top_n', type=int, default=30, help='For motif_count>=2, choose combos from top-N single motifs.')
@@ -164,6 +193,26 @@ def motif_to_family(motif_name: str) -> str:
     return re.sub(r'\.\d+$', '', str(motif_name))
 
 
+def pretty_motif_label(label: str) -> str:
+    parts = [re.sub(r'^GM\.5\.0\.', '', p.strip()) for p in str(label).split('+')]
+    return ' + '.join(parts)
+
+
+def metric_display_name(metric_col: str) -> str:
+    return {
+        'acc_drop': 'ACC Drop',
+        'sampled_acc_drop_mean': 'ACC Drop',
+        'active_acc_drop': 'ACC Drop',
+        'auroc_drop': 'AUROC Drop',
+        'sampled_auroc_drop_mean': 'AUROC Drop',
+        'active_auroc_drop': 'AUROC Drop',
+        'auprc_drop': 'AUPRC Drop',
+        'sampled_auprc_drop_mean': 'AUPRC Drop',
+        'active_auprc_drop': 'AUPRC Drop',
+        'mean_pred_drop': 'Mean Prediction Drop',
+    }.get(metric_col, metric_col)
+
+
 def build_groups(columns, mode='motif', family_level=False):
     groups = OrderedDict()
     if mode == 'column':
@@ -241,6 +290,33 @@ def restore_inplace(x, backup):
         x[:, c] = v
 
 
+def _safe_div(num, den):
+    if den == 0 or np.isnan(den):
+        return float('nan')
+    return float(num / den)
+
+
+def plot_topk_metric(df, combo_col, metric_col, topk, k, out_png):
+    if metric_col not in df.columns:
+        return False
+    sub = df.dropna(subset=[metric_col]).copy()
+    if len(sub) == 0:
+        return False
+    topk = min(int(topk), len(sub))
+    top = sub.sort_values(metric_col, ascending=False).head(topk).iloc[::-1]
+    plt.figure(figsize=(12, max(5, 0.5 * topk + 1)))
+    labels = [pretty_motif_label(x) for x in top[combo_col].astype(str).values]
+    metric_name = metric_display_name(metric_col)
+    item_name = 'Motif' if int(k) == 1 else 'Motif Combos'
+    plt.barh(labels, top[metric_col].values)
+    plt.xlabel(metric_name)
+    plt.title(f'Top {topk} {item_name} by {metric_name}')
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=180)
+    plt.close()
+    return True
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -272,6 +348,7 @@ def main():
 
     motif_df = pd.read_csv(args.motif_path, sep='\t', comment='#', index_col=0, engine='python')
     motif_df = motif_df.apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    motif_df_raw = motif_df.copy()
     motif_df = preprocess_motif_features(
         motif_df,
         train_ids=train_ids,
@@ -298,9 +375,11 @@ def main():
         raise ValueError('No genes left after filtering.')
     print('n_genes:', len(gene_ids))
 
+    motif_df_raw = motif_df_raw.loc[gene_ids]
     motif_df = motif_df.loc[gene_ids]
     motif_cols = list(motif_df.columns)
     motif_values = motif_df.values.astype(np.float32)
+    motif_raw_values = motif_df_raw.values.astype(np.float32)
     if motif_values.shape[1] != cfg['motif_feat_dim']:
         raise ValueError(
             f'motif dim mismatch: data={motif_values.shape[1]} ckpt={cfg["motif_feat_dim"]}'
@@ -361,8 +440,34 @@ def main():
             (g, idxs) for g, idxs in groups.items() if 'unknown' not in str(g).lower()
         )
         print(f'exclude_unknown enabled: {before_n} -> {len(groups)} groups')
+    if args.exclude_mixed:
+        before_n = len(groups)
+        groups = OrderedDict(
+            (g, idxs) for g, idxs in groups.items() if 'mixed' not in str(g).lower()
+        )
+        print(f'exclude_mixed enabled: {before_n} -> {len(groups)} groups')
+    if int(args.min_active_genes) > 0:
+        min_n = int(args.min_active_genes)
+        before_n = len(groups)
+        groups = OrderedDict(
+            (g, idxs)
+            for g, idxs in groups.items()
+            if int((motif_raw_values[:, idxs] > 0).any(axis=1).sum()) >= min_n
+        )
+        print(f'min_active_genes enabled ({min_n}): {before_n} -> {len(groups)} groups')
     group_names = list(groups.keys())
     print('n_groups:', len(group_names), 'group_mode:', args.group_mode, 'family_level:', args.family_level)
+    if int(args.active_sample_n) > 0:
+        if task != 'cls':
+            raise ValueError('--active_sample_n currently supports only --task cls')
+        if int(args.motif_count) != 1:
+            raise ValueError('--active_sample_n currently supports only --motif_count 1')
+        print(
+            'active_sample enabled:',
+            'n=', int(args.active_sample_n),
+            'trials=', int(args.active_sample_trials),
+            'seed=', int(args.active_sample_seed),
+        )
 
     # candidate group selection
     if args.motif_count == 1:
@@ -412,6 +517,8 @@ def main():
 
     x = motif_values.copy()
     rows = []
+    rng = np.random.default_rng(int(args.active_sample_seed))
+    n_total = len(gene_ids)
     for i, combo in enumerate(combos):
         col_set = sorted({c for g in combo for c in groups[g]})
         backup = apply_mask_inplace(x, col_set, args.mask_value)
@@ -420,6 +527,87 @@ def main():
 
         cur = evaluate_logits(y_true, logits, task, float(args.cls_prob_threshold))
         sc = score_row(base_metrics, cur, task=task)
+        extra = {}
+        if int(args.active_sample_n) > 0:
+            active_mask = (motif_raw_values[:, col_set] > 0).any(axis=1)
+            active_idx = np.where(active_mask)[0]
+            active_n = int(active_idx.size)
+            sample_n = int(args.active_sample_n)
+            extra['active_genes'] = active_n
+            extra['active_frac'] = float(active_n / max(1, n_total))
+            extra['active_sample_n'] = sample_n
+            if active_n >= sample_n and sample_n > 0:
+                base_active = evaluate_logits(
+                    y_true[active_idx],
+                    base_logits[active_idx],
+                    task='cls',
+                    cls_threshold=float(args.cls_prob_threshold),
+                )
+                cur_active = evaluate_logits(
+                    y_true[active_idx],
+                    logits[active_idx],
+                    task='cls',
+                    cls_threshold=float(args.cls_prob_threshold),
+                )
+                active_drop = float(base_active['acc'] - cur_active['acc'])
+                active_auroc_drop = float(base_active['auroc'] - cur_active['auroc'])
+                active_auprc_drop = float(base_active['auprc'] - cur_active['auprc'])
+                extra['base_acc_active'] = float(base_active['acc'])
+                extra['base_auroc_active'] = float(base_active['auroc'])
+                extra['base_auprc_active'] = float(base_active['auprc'])
+                extra['acc_mask_active'] = float(cur_active['acc'])
+                extra['auroc_mask_active'] = float(cur_active['auroc'])
+                extra['auprc_mask_active'] = float(cur_active['auprc'])
+                extra['active_acc_drop'] = active_drop
+                extra['active_auroc_drop'] = active_auroc_drop
+                extra['active_auprc_drop'] = active_auprc_drop
+
+                sampled_acc_drops = []
+                sampled_auroc_drops = []
+                sampled_auprc_drops = []
+                for _ in range(int(args.active_sample_trials)):
+                    sampled_idx = rng.choice(active_idx, size=sample_n, replace=False)
+                    base_s = evaluate_logits(
+                        y_true[sampled_idx],
+                        base_logits[sampled_idx],
+                        task='cls',
+                        cls_threshold=float(args.cls_prob_threshold),
+                    )
+                    cur_s = evaluate_logits(
+                        y_true[sampled_idx],
+                        logits[sampled_idx],
+                        task='cls',
+                        cls_threshold=float(args.cls_prob_threshold),
+                    )
+                    sampled_acc_drops.append(float(base_s['acc'] - cur_s['acc']))
+                    sampled_auroc_drops.append(float(base_s['auroc'] - cur_s['auroc']))
+                    sampled_auprc_drops.append(float(base_s['auprc'] - cur_s['auprc']))
+
+                for metric_name, drops in [
+                    ('acc', sampled_acc_drops),
+                    ('auroc', sampled_auroc_drops),
+                    ('auprc', sampled_auprc_drops),
+                ]:
+                    drops = np.asarray(drops, dtype=float)
+                    mean = float(np.nanmean(drops))
+                    std = float(np.nanstd(drops, ddof=1)) if drops.size > 1 else float('nan')
+                    extra[f'sampled_{metric_name}_drop_mean'] = mean
+                    extra[f'sampled_{metric_name}_drop_std'] = std
+                    extra[f'sampled_{metric_name}_drop_se'] = _safe_div(std, np.sqrt(max(1, drops.size)))
+            else:
+                extra['base_acc_active'] = float('nan')
+                extra['base_auroc_active'] = float('nan')
+                extra['base_auprc_active'] = float('nan')
+                extra['acc_mask_active'] = float('nan')
+                extra['auroc_mask_active'] = float('nan')
+                extra['auprc_mask_active'] = float('nan')
+                extra['active_acc_drop'] = float('nan')
+                extra['active_auroc_drop'] = float('nan')
+                extra['active_auprc_drop'] = float('nan')
+                for metric_name in ['acc', 'auroc', 'auprc']:
+                    extra[f'sampled_{metric_name}_drop_mean'] = float('nan')
+                    extra[f'sampled_{metric_name}_drop_std'] = float('nan')
+                    extra[f'sampled_{metric_name}_drop_se'] = float('nan')
         rows.append(
             {
                 'combo': ' + '.join(combo),
@@ -427,13 +615,17 @@ def main():
                 'n_groups_masked': len(combo),
                 'n_cols_masked': len(col_set),
                 **sc,
+                **extra,
             }
         )
         if (i + 1) % 100 == 0 or (i + 1) == len(combos):
             print(f'combo {i + 1}/{len(combos)}')
 
     out = pd.DataFrame(rows)
-    rank_col = 'acc_drop' if task == 'cls' else 'mean_pred_drop'
+    if int(args.active_sample_n) > 0:
+        rank_col = 'sampled_acc_drop_mean'
+    else:
+        rank_col = 'acc_drop' if task == 'cls' else 'mean_pred_drop'
     out = out.sort_values(rank_col, ascending=False).reset_index(drop=True)
 
     stem = Path(args.checkpoint).stem
@@ -445,24 +637,29 @@ def main():
     print('saved:', out_csv)
 
     topk = min(int(args.topk), len(out))
-    top = out.head(topk).iloc[::-1]
-    if task == 'cls':
-        x_vals = top['acc_drop'].values
-        xlab = 'ACC drop'
-        title = f'Top {topk} motif combos (k={k}) by ACC drop'
-    else:
-        x_vals = top['mean_pred_drop'].values
-        xlab = 'Mean prediction drop'
-        title = f'Top {topk} motif combos (k={k}) by prediction drop'
-    plt.figure(figsize=(12, max(5, 0.5 * topk + 1)))
-    plt.barh(top['combo'].values, x_vals)
-    plt.xlabel(xlab)
-    plt.title(title)
-    plt.tight_layout()
     out_png = os.path.join(args.output_dir, f'{tag}.top{topk}.png')
-    plt.savefig(out_png, dpi=180)
-    plt.close()
-    print('saved:', out_png)
+    ok = plot_topk_metric(out, 'combo', rank_col, topk, k, out_png)
+    if ok:
+        print('saved:', out_png)
+
+    if task == 'cls':
+        metric_cols = ['acc_drop', 'auroc_drop', 'auprc_drop']
+        if int(args.active_sample_n) > 0:
+            metric_cols = [
+                'sampled_acc_drop_mean',
+                'sampled_auroc_drop_mean',
+                'sampled_auprc_drop_mean',
+                *metric_cols,
+            ]
+        for metric_col in metric_cols:
+            if metric_col == rank_col:
+                continue
+            if metric_col not in out.columns:
+                continue
+            metric_png = os.path.join(args.output_dir, f'{tag}.top{topk}.{metric_col}.png')
+            ok = plot_topk_metric(out, 'combo', metric_col, topk, k, metric_png)
+            if ok:
+                print('saved:', metric_png)
 
     print(f'top {topk}:')
     print(out.head(topk).to_string(index=False))
