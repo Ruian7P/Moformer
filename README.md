@@ -1,87 +1,189 @@
-<p align="center">
-  <img width="700" src="images/EPInformer_logo2.svg">
-</p>
+# Moformer: promoter activity prediction from promoter motifs
 
-Welcome to the EPInformer framework repository! EPInformer is a scalable deep learning framework for gene expression prediction by integrating promoter-enhancer sequences with epigenomic signals. EPInformer is designed for three key applications: 1) predict gene expression levels using promoter-enhancer sequences, epigenomic signals, and chromatin contacts; 2) identify cell-type-specific enhancer-gene interactions and conduct in-silico perturbation; 3) predict enhancer activity and recapitulate transcription factor binding motifs from sequences. The framework is described in the following bioRxiv preprint:
+Moformer is a promoter-only model for predicting whether a gene is expressed from transcription-factor motif features in its promoter. The main experiment in this repository uses K562 gene-expression labels and motif-count features from a 2 kb promoter window around the TSS.
 
-[https://www.biorxiv.org/content/10.1101/2024.08.01.606099v1](https://www.biorxiv.org/content/10.1101/2024.08.01.606099v1).
+## Repository Structure
 
-This repository can be used to run the EPInformer model to predit gene expression (e.g., CAGE and RNA-seq) and prioritize enhancer-gene interactions for input DNA sequences and epigenomic signals (e.g., DNase, H3K27ac and Hi-C).
-
-We also provide information and instructions for how to train different versions of EPInformer given diffenet inputs including DNA sequence, epigemoic signals and chromatin contacts.
-
-<p align="center">
-  <img height="560" src="images/EPInformer.png">
-</p>
-
-### Requirements
-
-EPInformer requires Python 3.6+ and Python packages PyTorch (>=2.1). You can follow PyTorch installation steps [here](https://pytorch.org/get-started/locally/).
-
-### Setup
-
-EPInformer requires ABC enhancer-gene data for training and predicting gene expression. You can obtain the ABC data from [ENCODE](https://www.encodeproject.org/search/?type=Annotation&annotation_type=element+gene+regulatory+interaction+predictions&software_used.software.name=abc-enhancer-gene-prediction-encode_v1) or by running the ABC pipeline available on their [GitHub](https://github.com/broadinstitute/ABC-Enhancer-Gene-Prediction) acquire cell-type-specific gene-enhancer links. For K562 and GM12878 cell lines, you can download the training resource of EPInformer from [Zenodo](https://zenodo.org/records/13232430) by running the command: 
-
-```
-sh ./download_data.sh
+```text
+src/train_Moformer_cls.py              # Train Moformer classification models
+src/interpret_motif_combo.py           # Single motif / motif-combination ablation
+src/interpret_motif_bin_impact.py      # Bin-level and per-motif bin ablation
+src/interpret_motif_bin_distribution.py# Motif hit distribution across promoter bins
+src/tools/gimmemotifs_scan.sh          # Example GimmeMotifs scan command
+src/tools/interpret_motif.sh           # Run motif-family ablation analysis
+src/tools/interpret_motif_bin.sh       # Run bin-level motif interpretation analyses
+data/                                # Expression labels, split files, and motif features
+results/                             # Model checkpoints and analysis outputs
+logs/                                # Training logs
 ```
 
-To  experiment three applications below with EPInformer, please first run the folloing command to setup the environment:
+## Environment Setup
 
-```
-# Clone this repository
-git clone https://github.com/JasonLinjc/EPInformer.git
-cd EPInformer
+Create a conda environment with Python, PyTorch, scientific Python packages, and GimmeMotifs.
 
-# create 'EPInformer_env' conda environment by running the following:
-conda create --name EPInformer_env python=3.8 pandas scipy scikit-learn jupyter seaborn
-source activate EPInformer_env
+```bash
+conda create -n moformer python=3.10 -y
+conda activate moformer
 
-# GPU version pytorch
-conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia
-# CPU version pytorch
-conda install pytorch cpuonly -c pytorch
+# GPU PyTorch. Adjust the CUDA version if needed.
+conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia -y
 
-# Other pacakges
-pip install pyranges pyfaidx kipoiseq openpyxl tangermeme
+# Core Python dependencies.
+pip install numpy pandas scipy scikit-learn matplotlib seaborn tqdm h5py pyfaidx pyranges kipoiseq openpyxl
+
+# Motif scanning toolkit.
+conda install -c conda-forge -c bioconda gimmemotifs -y
 ```
 
-### Gene expression prediction
+Check that the key commands are available:
 
-An end-to-end example to predict gene expression from promoter-enhancer sequences, epigenomic signals and chromatin contacts is in [predict_gene_expression.ipynb](https://github.com/pinellolab/EPInformer/blob/main/predict_gene_expression.ipynb). You can run this notebook yourself to experiment with different EPInformers.
-<p align="center">
-  <img height="600" src="images/gene_expression.png">
-</p>
-
-### Enhancer-gene links prediction
-We evaluated EPInformer for enhancer–gene link prediction using the K562 CRISPR and eQTLs benchmark datasets from the Engreitz Lab repository ([CRISPR](https://github.com/EngreitzLab/CRISPR_comparison/) and [eQTL enrichment](https://github.com/EngreitzLab/eQTLEnrichment)).
-<!-- We provide a jupyter notebook ([2_prioritize_enhancer_gene_links.ipynb](https://github.com/JasonLinjc/EPInformer/blob/main/2_prioritize_enhancer_gene_links.ipynb)) for pre-processing CRISPRi-FlowFISH data and scoring enhancer-gene links using EPInformer-derived attention scores and the Attention-ABC score. Additionally, this notebook provides a end-to-end example of in-silico perturbations on candidate elements within 100kb of *KLF1* and predicting their effects, with *KLF1* excluded from the training data to prevent overfitting. -->
-<p align="center">
-  <img height="750" src="images/EG_benchmark.png">
-</p>
-
-### Enhancer activity prediction and TF motif discovery
-To predict cell-type-specific enhancer activity, we provide sequence-based predictors trained on H3K27ac and DNase signals in K562 and GM12878 cell lines separately. Enhancer activity was calculated using the [ABC score](https://github.com/broadinstitute/ABC-Enhancer-Gene-Prediction). Additionally, [Tangermeme]([https://github.com/ilyes495/tangermeme/tree/main](https://github.com/jmschrei/tangermeme)) was used to perform in-silico saturation mutagenesis (ISM) on the enhancer sequence to identify key motifs contributing to the predicted activity. The notebook ([predict_enhancer_activity.ipynb](https://github.com/pinellolab/EPInformer/blob/main/predict_enhancer_activity.ipynb)) is available for experimenting with enhancer activity prediction and transcription factor motif discovery.
-<p align="center">
-  <img height="500" src="images/KLF1_showcase.png">
-</p>
-
-<!-- ## Training
-You can re-train EPInformer models on K562 and GM12878 data using the command lines:
-
+```bash
+python -c "import torch, pandas, sklearn; print(torch.__version__)"
+gimme --help
 ```
-# Download K562 and GM12878 data
-sh ./download_data.sh
 
-# Train EPInformer-PE on K562 to predict CAGE-seq expression
-python train_EPInformer.py --cell K562  --model_type EPInformer-PE --expr_assay CAGE --use_pretrained_encoder --batch_size 16 --cuda
+## Data
 
-# Train EPInformer-PE-Activity on GM12878 to predict RNA-seq expression
-python train_EPInformer.py --cell GM12878 --model_type EPInformer-PE-Activity --expr_assay RNA --use_pretrained_encoder --batch_size 16 --cuda
+The main files used by Moformer are:
 
-# Train EPInformer-PE-Activity-HiC on K562 to predict RNA-seq expression
-python train_EPInformer.py --cell K562 --model_type EPInformer-PE-Activity-HiC --expr_assay RNA --use_pretrained_encoder --batch_size 16 --cuda
-``` -->
+```text
+data/GM12878_K562_18377_gene_expr_fromXpresso_with_sequence_strand.csv
+data/leave_chrom_out_crossvalidation_split_18377genes.csv
+data/promoter_2k_motif_counts_all_pos4plusglobal.tsv
+```
 
-## Help 
-Please post in the GitHub issues or e-mail Jiecong Lin (_jieconglin(at)@outlook.com_) with any question about the repository, requests for more data, etc. 
+The expression table contains 18,377 protein-coding genes with K562 expression labels and promoter sequences. The split table contains chromosome-based train/validation/test splits. The motif table contains promoter motif-count features from four 500 bp promoter bins plus one global promoter-count channel.
+
+If the large EPInformer training files are missing, download them first. The expression table, split table, and motif-count table should be placed under `data/` with the filenames shown above:
+
+```bash
+bash download_data.sh
+```
+
+## Motif Feature Generation
+
+If `data/promoter_2k_motif_counts_all_pos4plusglobal.tsv` already exists, this step can be skipped.
+
+To scan promoter sequences with GimmeMotifs, use:
+
+```bash
+bash src/tools/gimmemotifs_scan.sh
+```
+
+The scan command uses the `gimme.vertebrate.v5.0` motif database and an FPR cutoff of `0.01`. You may need to edit the hg38 genome FASTA path inside `src/tools/gimmemotifs_scan.sh` before running it.
+
+The main model expects a gene-by-feature TSV where rows are Ensembl gene IDs and columns are motif features. For the 4-bin model, columns use bin-specific motif counts plus global motif counts.
+
+## Train Moformer
+
+Train the main Moformer-P classification model on the Enformer-style holdout split:
+
+```bash
+mkdir -p logs results
+
+python -u src/train_Moformer_cls.py \
+  --model_type Moformer-P \
+  --fold enformer \
+  --motif_path data/promoter_2k_motif_counts_all_pos4plusglobal.tsv \
+  --motif_zscore \
+  --motif_multitoken \
+  --motif_multitoken_include_global \
+  --early_stop_patience 10 \
+  --seed 42 \
+  | tee logs/train_Moformer_P_pos4_cls_seed42.log
+```
+
+Train all chromosome-based folds:
+
+```bash
+python -u src/train_Moformer_cls.py \
+  --model_type Moformer-P \
+  --fold all \
+  --motif_path data/promoter_2k_motif_counts_all_pos4plusglobal.tsv \
+  --motif_zscore \
+  --motif_multitoken \
+  --motif_multitoken_include_global \
+  --early_stop_patience 10 \
+  --seed 42 \
+  | tee logs/train_Moformer_P_pos4_cls_all_seed42.log
+```
+
+Outputs are saved under:
+
+```text
+results/Moformer-P-cls/
+```
+
+Each fold writes a best checkpoint, prediction CSV, and a summary CSV containing ACC, AUROC, and AUPRC.
+
+## Motif Ablation Analysis
+
+After training, set the checkpoint path in `src/tools/interpret_motif.sh` if needed, then run:
+
+```bash
+bash src/tools/interpret_motif.sh
+```
+
+This runs single motif-family ablation on the Enformer-style test set. It masks motif families, recomputes prediction performance, and writes CSV summaries and top motif figures to:
+
+```text
+results/motif_combo_occlusion/
+```
+
+To run the command manually:
+
+```bash
+python -u src/interpret_motif_combo.py \
+  --checkpoint results/Moformer-P-cls/<checkpoint>.pt \
+  --motif_path data/promoter_2k_motif_counts_all_pos4plusglobal.tsv \
+  --motif_zscore \
+  --task cls \
+  --fold enformer \
+  --split test \
+  --family_level \
+  --exclude_unknown \
+  --exclude_mixed \
+  --group_mode motif \
+  --motif_count 1 \
+  --active_sample_n 50 \
+  --active_sample_trials 10 \
+  --active_sample_seed 42 \
+  --min_active_genes 50
+```
+
+## Bin-Level Interpretation
+
+After training, set `CKPT_MOTIF4` in `src/tools/interpret_motif_bin.sh` if needed, then run:
+
+```bash
+bash src/tools/interpret_motif_bin.sh
+```
+
+This script performs three analyses:
+
+1. Mask all motif features in each promoter bin and measure performance drop.
+2. Plot motif hit distributions across promoter bins for selected motif families.
+3. Mask selected motif families in each bin and measure per-motif, per-bin performance drop.
+
+Outputs are saved under:
+
+```text
+results/motif_bin_impact/
+results/motif_bin_distribution/
+```
+
+## Main Model Settings
+
+The main reported Moformer-P model uses:
+
+```text
+Cell line: K562
+Task: binary expression classification
+Positive label: Actual_K562 > 0
+Input: four promoter-bin motif-count channels + one global motif-count channel
+Motif preprocessing: z-score using training-split statistics
+Architecture: multi-token Moformer-P with 5 motif tokens
+Training seed: 42
+Validation metric for early stopping: AUPRC
+Test split for interpretation: Enformer-style holdout test split
+```
