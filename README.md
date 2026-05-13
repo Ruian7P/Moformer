@@ -1,4 +1,4 @@
-# Moformer: promoter activity prediction from promoter motifs
+# Moformer: Predicting Promoter Activity from Promoter Motifs
 
 Moformer is a promoter-only model for predicting whether a gene is expressed from transcription-factor motif features in its promoter. The main experiment in this repository uses K562 gene-expression labels and motif-count features from a 2 kb promoter window around the TSS.
 
@@ -35,12 +35,6 @@ pip install numpy pandas scipy scikit-learn matplotlib seaborn tqdm h5py pyfaidx
 conda install -c conda-forge -c bioconda gimmemotifs -y
 ```
 
-Check that the key commands are available:
-
-```bash
-python -c "import torch, pandas, sklearn; print(torch.__version__)"
-gimme --help
-```
 
 ## Data
 
@@ -54,33 +48,25 @@ data/promoter_2k_motif_counts_all_pos4plusglobal.tsv
 
 The expression table contains 18,377 protein-coding genes with K562 expression labels and promoter sequences. The split table contains chromosome-based train/validation/test splits. The motif table contains promoter motif-count features from four 500 bp promoter bins plus one global promoter-count channel.
 
-If the large EPInformer training files are missing, download them first. The expression table, split table, and motif-count table should be placed under `data/` with the filenames shown above:
+Step 1: download the required data files.
 
 ```bash
 bash download_data.sh
 ```
 
-## Motif Feature Generation
-
-If `data/promoter_2k_motif_counts_all_pos4plusglobal.tsv` already exists, this step can be skipped.
-
-To scan promoter sequences with GimmeMotifs, use:
+Step 2: generate promoter motif features with GimmeMotifs.
 
 ```bash
 bash src/tools/gimmemotifs_scan.sh
 ```
 
-The scan command uses the `gimme.vertebrate.v5.0` motif database and an FPR cutoff of `0.01`. You may need to edit the hg38 genome FASTA path inside `src/tools/gimmemotifs_scan.sh` before running it.
-
-The main model expects a gene-by-feature TSV where rows are Ensembl gene IDs and columns are motif features. For the 4-bin model, columns use bin-specific motif counts plus global motif counts.
+The motif scan uses the `gimme.vertebrate.v5.0` motif database and an FPR cutoff of `0.01`. Before running it on a new machine, edit the hg38 genome FASTA path inside `src/tools/gimmemotifs_scan.sh`.
 
 ## Train Moformer
 
-Train the main Moformer-P classification model on the Enformer-style holdout split:
+Train the main Moformer-P classification model on the holdout split:
 
 ```bash
-mkdir -p logs results
-
 python -u src/train_Moformer_cls.py \
   --model_type Moformer-P \
   --fold enformer \
@@ -124,31 +110,10 @@ After training, set the checkpoint path in `src/tools/interpret_motif.sh` if nee
 bash src/tools/interpret_motif.sh
 ```
 
-This runs single motif-family ablation on the Enformer-style test set. It masks motif families, recomputes prediction performance, and writes CSV summaries and top motif figures to:
+This runs single motif-family ablation on the holdout test set. It masks motif families, recomputes prediction performance, and writes CSV summaries and top motif figures to:
 
 ```text
 results/motif_combo_occlusion/
-```
-
-To run the command manually:
-
-```bash
-python -u src/interpret_motif_combo.py \
-  --checkpoint results/Moformer-P-cls/<checkpoint>.pt \
-  --motif_path data/promoter_2k_motif_counts_all_pos4plusglobal.tsv \
-  --motif_zscore \
-  --task cls \
-  --fold enformer \
-  --split test \
-  --family_level \
-  --exclude_unknown \
-  --exclude_mixed \
-  --group_mode motif \
-  --motif_count 1 \
-  --active_sample_n 50 \
-  --active_sample_trials 10 \
-  --active_sample_seed 42 \
-  --min_active_genes 50
 ```
 
 ## Bin-Level Interpretation
@@ -185,5 +150,9 @@ Motif preprocessing: z-score using training-split statistics
 Architecture: multi-token Moformer-P with 5 motif tokens
 Training seed: 42
 Validation metric for early stopping: AUPRC
-Test split for interpretation: Enformer-style holdout test split
+Test split for interpretation: holdout test split
 ```
+
+
+## Acknowledgement
+We greatly appreciate the contributions of [EPInformer](https://github.com/pinellolab/EPInformer). This remarkable repository has significantly benefited our work.
