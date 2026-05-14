@@ -1,4 +1,4 @@
-# Moformer: Predicting Promoter Activity from Promoter Motifs
+# Moformer: Predicting Promoter Activity with Motifs
 
 Moformer is a promoter-only model for predicting whether a gene is expressed from transcription-factor motif features in its promoter. The main experiment in this repository uses K562 gene-expression labels and motif-count features from a 2 kb promoter window around the TSS.
 
