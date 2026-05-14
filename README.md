@@ -56,13 +56,13 @@ genomepy install hg38 --annotation
 python src/tools/export_promoter_fasta.py
 ```
 
-Step 2: generate promoter motif features with GimmeMotifs.
+Step 2: generate the promoter motif feature matrix used for training.
 
 ```bash
-bash src/tools/gimmemotifs_scan.sh
+bash src/tools/pipeline.sh
 ```
 
-The motif scan uses the `gimme.vertebrate.v5.0` motif database and an FPR cutoff of `0.01`. Before running it on a new machine, edit the hg38 genome FASTA path inside `src/tools/gimmemotifs_scan.sh`.
+This pipeline exports/scans promoter motifs with GimmeMotifs and builds `data/promoter_2k_motif_counts_all_pos4plusglobal.tsv`, the 4-bin plus global motif-count matrix used by the main Moformer-P model. The motif scan uses the `gimme.vertebrate.v5.0` motif database and an FPR cutoff of `0.01`. Before running it on a new machine, edit the hg38 genome FASTA path inside `src/tools/pipeline.sh`.
 
 ## Train Moformer
 

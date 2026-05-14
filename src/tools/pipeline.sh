@@ -30,6 +30,7 @@ OUT_COUNT="data/promoter_2k_motif_counts.tsv"
 OUT_SCORE="data/promoter_2k_motif_scores.tsv"
 OUT_HITS_REL_BED="data/promoter_2k_hits_relative.bed"
 OUT_HITS_REL_TSV="data/promoter_2k_hits_relative.tsv"
+OUT_POS4_GLOBAL="data/promoter_2k_motif_counts_all_pos4plusglobal.tsv"
 OUT_FILTERED_COUNT="data/promoter_2k_motif_counts_openchrom.tsv"
 
 if ! command -v gimme >/dev/null 2>&1; then
@@ -74,20 +75,30 @@ run_gimme_scan() {
   return 1
 }
 
-echo "[1/5] Scanning motifs to count matrix"
+echo "[1/6] Scanning motifs to count matrix"
 run_gimme_scan -t "$OUT_COUNT" "step1_count"
 
-echo "[2/5] Scanning motifs to score matrix"
+echo "[2/6] Scanning motifs to score matrix"
 run_gimme_scan -T "$OUT_SCORE" "step2_score"
 
-echo "[3/5] Scanning motifs to per-hit relative BED"
+echo "[3/6] Scanning motifs to per-hit relative BED"
 run_gimme_scan -b "$OUT_HITS_REL_BED" "step3_hits_bed"
 
-echo "[4/5] Converting BED hits to normalized TSV"
+echo "[4/6] Converting BED hits to normalized TSV"
 awk 'BEGIN{OFS="\t"; print "gene_id\tmotif\tstart\tend\tscore\tstrand"} !/^#/ {print $1,$4,$2,$3,$5,$6}' \
   "$OUT_HITS_REL_BED" > "$OUT_HITS_REL_TSV"
 
-echo "[5/5] Filtering motif hits by open chromatin and rebuilding gene x motif count matrix"
+echo "[5/6] Building all-motif 4-bin + global count matrix"
+python src/tools/build_positional_motif_matrix.py \
+  --hits "$OUT_HITS_REL_TSV" \
+  --out "$OUT_POS4_GLOBAL" \
+  --n-bins 4 \
+  --promoter-len 2000 \
+  --fill-genes-from "$EXPR_ANNOT" \
+  --fill-genes-col gene_id \
+  --min-count 0
+
+echo "[6/6] Filtering motif hits by open chromatin and rebuilding gene x motif count matrix"
 python src/tools/build_openchrom_motif_matrix.py \
   --motif-hits "$OUT_HITS_REL_TSV" \
   --hits-sep $'\t' \
@@ -112,5 +123,7 @@ python src/tools/build_openchrom_motif_matrix.py \
   --promoter-upstream 1500 \
   --promoter-downstream 500
 
-echo "Done. Use this denoised matrix for training: $OUT_FILTERED_COUNT"
+echo "Done."
+echo "Main Moformer-P training matrix: $OUT_POS4_GLOBAL"
+echo "Optional open-chromatin filtered matrix: $OUT_FILTERED_COUNT"
 echo "If a scan step failed, check logs under: $LOG_DIR"
