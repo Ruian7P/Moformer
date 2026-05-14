@@ -32,7 +32,7 @@ conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia -y
 pip install numpy pandas scipy scikit-learn matplotlib seaborn tqdm h5py pyfaidx pyranges kipoiseq openpyxl
 
 # Motif scanning toolkit.
-conda install -c conda-forge -c bioconda gimmemotifs -y
+conda install -c conda-forge -c bioconda gimmemotifs==0.18.0 -y
 ```
 
 
@@ -52,6 +52,8 @@ Step 1: download the required data files.
 
 ```bash
 bash download_data.sh
+genomepy install hg38 --annotation
+python src/tools/export_promoter_fasta.py
 ```
 
 Step 2: generate promoter motif features with GimmeMotifs.

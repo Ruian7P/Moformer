@@ -1,3 +1,6 @@
 results/
-data/
 logs/
+data/*
+!data/GM12878_K562_18377_gene_expr_fromXpresso_with_sequence_strand.csv
+!data/leave_chrom_out_crossvalidation_split_18377genes.csv
+!data/promoter_2k_motif_counts_all_pos4plusglobal.tsv
